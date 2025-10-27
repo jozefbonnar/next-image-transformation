@@ -12,11 +12,7 @@ Bun.serve({
     async fetch(req) {
         const url = new URL(req.url);
         if (url.pathname === "/") {
-            return new Response(`<h3>Next Image Transformation v${version}</h3>More info <a href="https://github.com/coollabsio/next-image-transformation">https://github.com/coollabsio/next-image-transformation</a>.`, {
-                headers: {
-                    "Content-Type": "text/html",
-                },
-            });
+            return Response.redirect("https://jozef.uk", 302);
         }
 
         if (url.pathname === "/health") {
