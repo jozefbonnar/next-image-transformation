@@ -7,6 +7,7 @@ const version = "0.0.3"
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
 let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
+const healthcheckImageUrl = process?.env?.HEALTHCHECK_IMAGE_URL || "https://s3-eu-west-1.amazonaws.com/mprod.xxwmm.retail.brandbank.zzzzzzzzzz/images/brandbank/5010251535447_0.jpg";
 const cacheDir = process?.env?.CACHE_DIR || "./cache";
 const cacheEnabled = process?.env?.CACHE_ENABLED !== "false";
 let cacheInitialized = false;
@@ -25,7 +26,7 @@ Bun.serve({
         }
 
         if (url.pathname === "/health") {
-            return new Response("OK");
+            return await healthCheck();
         };
         if (url.pathname === "/stats") return await stats();
         if (url.pathname.startsWith("/image/")) return await resize(url);
@@ -205,4 +206,27 @@ async function getCacheStats() {
 
 function toMB(bytes) {
     return Number((bytes / (1024 * 1024)).toFixed(2));
+}
+
+async function healthCheck() {
+    const preset = "pr:sharp";
+    const healthUrl = `${imgproxyUrl}/${preset}/resize:fit:1:1/plain/${healthcheckImageUrl}`;
+
+    try {
+        const response = await fetch(healthUrl, {
+            headers: {
+                "Accept": "image/avif,image/webp,image/apng,*/*",
+            }
+        });
+
+        if (!response.ok) {
+            console.warn("Health check failed", response.status, response.statusText);
+            return new Response("Imgproxy health check failed", { status: 503 });
+        }
+
+        return new Response("OK");
+    } catch (error) {
+        console.error("Health check error", error);
+        return new Response("Imgproxy health check failed", { status: 503 });
+    }
 }
