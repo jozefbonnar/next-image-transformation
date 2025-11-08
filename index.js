@@ -1,7 +1,15 @@
+const { mkdir, readFile, writeFile, access } = require("node:fs/promises");
+const { constants: fsConstants } = require("node:fs");
+const { createHash } = require("node:crypto");
+
 const version = "0.0.3"
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
-let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://imgproxy:8080";
+let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
+const cacheDir = process?.env?.CACHE_DIR || "./cache";
+const cacheEnabled = process?.env?.CACHE_ENABLED !== "false";
+let cacheInitialized = false;
+
 if (process.env.NODE_ENV === "development") {
     imgproxyUrl = "http://localhost:8888"
 }
@@ -39,6 +47,21 @@ async function resize(url) {
     const width = url.searchParams.get("width") || 0;
     const height = url.searchParams.get("height") || 0;
     const quality = url.searchParams.get("quality") || 75;
+    const cacheKey = getCacheKey(src, width, height, quality);
+
+    if (cacheEnabled) {
+        const cached = await readFromCache(cacheKey);
+        if (cached) {
+            cached.headers.set("Server", "NextImageTransformation");
+            cached.headers.set("X-Cache", "HIT");
+            return new Response(cached.body, {
+                headers: cached.headers,
+                status: cached.status,
+                statusText: cached.statusText
+            });
+        }
+    }
+
     try {
         const url = `${imgproxyUrl}/${preset}/resize:fill:${width}:${height}/q:${quality}/plain/${src}`
         const image = await fetch(url, {
@@ -46,13 +69,79 @@ async function resize(url) {
                 "Accept": "image/avif,image/webp,image/apng,*/*",
             }
         })
+        const arrayBuffer = await image.arrayBuffer();
         const headers = new Headers(image.headers);
         headers.set("Server", "NextImageTransformation");
-        return new Response(image.body, {
-            headers
+        if (image.ok && cacheEnabled) {
+            await writeToCache(cacheKey, arrayBuffer, headers, image.status, image.statusText);
+        }
+        headers.set("X-Cache", image.ok ? (cacheEnabled ? "MISS" : "BYPASS") : "SKIP");
+        return new Response(arrayBuffer, {
+            headers,
+            status: image.status,
+            statusText: image.statusText
         })
     } catch (e) {
         console.log(e)
         return new Response("Error resizing image")
+    }
+}
+
+function getCacheKey(src, width, height, quality) {
+    const hash = createHash("sha256");
+    hash.update(`${src}|${width}|${height}|${quality}`);
+    return hash.digest("hex");
+}
+
+async function ensureCacheDir() {
+    if (!cacheEnabled || cacheInitialized) return;
+    await mkdir(cacheDir, { recursive: true });
+    cacheInitialized = true;
+}
+
+async function readFromCache(key) {
+    try {
+        const filePath = `${cacheDir}/${key}`;
+        const metaPath = `${filePath}.json`;
+        await ensureCacheDir();
+        await Promise.all([
+            access(filePath, fsConstants.F_OK),
+            access(metaPath, fsConstants.F_OK)
+        ]);
+        const [body, metaRaw] = await Promise.all([
+            readFile(filePath),
+            readFile(metaPath, "utf8")
+        ]);
+        const meta = JSON.parse(metaRaw);
+        const headers = new Headers(meta.headers || []);
+        return {
+            body,
+            headers,
+            status: meta.status || 200,
+            statusText: meta.statusText || "OK"
+        };
+    } catch (err) {
+        return null;
+    }
+}
+
+async function writeToCache(key, data, headers, status, statusText) {
+    try {
+        await ensureCacheDir();
+        const filePath = `${cacheDir}/${key}`;
+        const metaPath = `${filePath}.json`;
+        const serializedHeaders = Array.from(headers.entries()).filter(
+            ([name]) => name.toLowerCase() !== "x-cache"
+        );
+        await Promise.all([
+            writeFile(filePath, new Uint8Array(data)),
+            writeFile(metaPath, JSON.stringify({
+                headers: serializedHeaders,
+                status,
+                statusText
+            }))
+        ]);
+    } catch (err) {
+        console.warn("Failed to write image cache", err);
     }
 }
