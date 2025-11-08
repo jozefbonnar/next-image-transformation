@@ -1,6 +1,7 @@
-const { mkdir, readFile, writeFile, access } = require("node:fs/promises");
+const { mkdir, readFile, writeFile, access, readdir, stat } = require("node:fs/promises");
 const { constants: fsConstants } = require("node:fs");
 const { createHash } = require("node:crypto");
+const { join } = require("node:path");
 
 const version = "0.0.3"
 
@@ -26,6 +27,7 @@ Bun.serve({
         if (url.pathname === "/health") {
             return new Response("OK");
         };
+        if (url.pathname === "/stats") return await stats();
         if (url.pathname.startsWith("/image/")) return await resize(url);
         return Response.redirect("https://github.com/coollabsio/next-image-transformation", 302);
     }
@@ -101,7 +103,7 @@ async function ensureCacheDir() {
 
 async function readFromCache(key) {
     try {
-        const filePath = `${cacheDir}/${key}`;
+        const filePath = join(cacheDir, key);
         const metaPath = `${filePath}.json`;
         await ensureCacheDir();
         await Promise.all([
@@ -128,7 +130,7 @@ async function readFromCache(key) {
 async function writeToCache(key, data, headers, status, statusText) {
     try {
         await ensureCacheDir();
-        const filePath = `${cacheDir}/${key}`;
+        const filePath = join(cacheDir, key);
         const metaPath = `${filePath}.json`;
         const serializedHeaders = Array.from(headers.entries()).filter(
             ([name]) => name.toLowerCase() !== "x-cache"
@@ -144,4 +146,59 @@ async function writeToCache(key, data, headers, status, statusText) {
     } catch (err) {
         console.warn("Failed to write image cache", err);
     }
+}
+
+async function stats() {
+    try {
+        const summary = await getCacheStats();
+        const headers = new Headers({
+            "Content-Type": "application/json",
+            "Server": "NextImageTransformation"
+        });
+        return new Response(JSON.stringify(summary, null, 2), { headers });
+    } catch (err) {
+        console.error("Failed to calculate cache stats", err);
+        return new Response("Failed to read cache stats", { status: 500 });
+    }
+}
+
+async function getCacheStats() {
+    if (!cacheEnabled) {
+        return {
+            cacheEnabled: false,
+            cacheDir,
+            entries: 0,
+            imageBytes: 0,
+            metadataBytes: 0,
+            totalBytes: 0
+        };
+    }
+
+    await ensureCacheDir();
+    const entries = await readdir(cacheDir, { withFileTypes: true });
+
+    let itemCount = 0;
+    let imageBytes = 0;
+    let metadataBytes = 0;
+
+    for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const filePath = join(cacheDir, entry.name);
+        const size = (await stat(filePath)).size;
+        if (entry.name.endsWith(".json")) {
+            metadataBytes += size;
+        } else {
+            itemCount += 1;
+            imageBytes += size;
+        }
+    }
+
+    return {
+        cacheEnabled: true,
+        cacheDir,
+        entries: itemCount,
+        imageBytes,
+        metadataBytes,
+        totalBytes: imageBytes + metadataBytes
+    };
 }
