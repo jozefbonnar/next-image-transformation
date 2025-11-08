@@ -168,9 +168,9 @@ async function getCacheStats() {
             cacheEnabled: false,
             cacheDir,
             entries: 0,
-            imageBytes: 0,
-            metadataBytes: 0,
-            totalBytes: 0
+            imageMB: 0,
+            metadataMB: 0,
+            totalMB: 0
         };
     }
 
@@ -197,8 +197,12 @@ async function getCacheStats() {
         cacheEnabled: true,
         cacheDir,
         entries: itemCount,
-        imageBytes,
-        metadataBytes,
-        totalBytes: imageBytes + metadataBytes
+        imageMB: toMB(imageBytes),
+        metadataMB: toMB(metadataBytes),
+        totalMB: toMB(imageBytes + metadataBytes)
     };
+}
+
+function toMB(bytes) {
+    return Number((bytes / (1024 * 1024)).toFixed(2));
 }
