@@ -26,6 +26,7 @@ Bun.serve({
         }
 
         if (url.pathname === "/health") {
+            console.log("Health check requested");
             return await healthCheck();
         };
         if (url.pathname === "/stats") return await stats();
