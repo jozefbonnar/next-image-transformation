@@ -8,7 +8,7 @@ const version = "0.0.3"
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
 let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
-const healthcheckImageUrl = process?.env?.HEALTHCHECK_IMAGE_URL || "https://s3-eu-west-1.amazonaws.com/mprod.xxwmm.retail.brandbank.zzzzzzzzzz/images/brandbank/5010251535447_0.jpg";
+const healthcheckImageUrl = process?.env?.HEALTHCHECK_IMAGE_URL || "https://sampletestfile.com/wp-content/uploads/2023/05/585-KB.png";
 const cacheDir = process?.env?.CACHE_DIR || "./cache";
 const cacheEnabled = process?.env?.CACHE_ENABLED !== "false";
 let cacheInitialized = false;
