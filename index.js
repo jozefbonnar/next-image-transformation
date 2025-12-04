@@ -11,6 +11,7 @@ let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
 const healthcheckImageUrl = process?.env?.HEALTHCHECK_IMAGE_URL || "https://sampletestfile.com/wp-content/uploads/2023/05/585-KB.png";
 const cacheDir = process?.env?.CACHE_DIR || "./cache";
 const cacheEnabled = process?.env?.CACHE_ENABLED !== "false";
+const whiteBackgroundThreshold = parseInt(process?.env?.WHITE_BACKGROUND_THRESHOLD || "253");
 let cacheInitialized = false;
 
 if (process.env.NODE_ENV === "development") {
@@ -71,7 +72,6 @@ async function resize(url) {
     const quality = url.searchParams.get("quality") || 75;
     const removeBg = url.searchParams.get("removeBg") === "true" || url.searchParams.get("transparent") === "true";
     const cacheKey = getCacheKey(src, width, height, quality, removeBg);
-    console.log("Resize request", width, height, quality);
     if (cacheEnabled) {
         const cached = await readFromCache(cacheKey);
         if (cached) {
@@ -134,7 +134,7 @@ async function resize(url) {
                 });
                 
                 if (cacheEnabled) {
-                    await writeToCache(cacheKey, outputBuffer, headers, 200, "OK");
+                    await writeToCache(cacheKey, outputBuffer, headers, 200, "OK", true); // true = transparent
                 }
                 headers.set("X-Cache", cacheEnabled ? "MISS" : "BYPASS");
                 
@@ -161,7 +161,7 @@ async function resize(url) {
         const headers = new Headers(image.headers);
         headers.set("Server", "NextImageTransformation");
         if (image.ok && cacheEnabled) {
-            await writeToCache(cacheKey, arrayBuffer, headers, image.status, image.statusText);
+            await writeToCache(cacheKey, arrayBuffer, headers, image.status, image.statusText, false); // false = normal
         }
         headers.set("X-Cache", image.ok ? (cacheEnabled ? "MISS" : "BYPASS") : "SKIP");
         return new Response(arrayBuffer, {
@@ -193,7 +193,7 @@ async function removeWhiteBackground(imageBuffer) {
     const width = info.width;
     const height = info.height;
     const pixels = new Uint8Array(data);
-    const threshold = 245; // White threshold
+    const threshold = whiteBackgroundThreshold; // White threshold (configurable via WHITE_BACKGROUND_THRESHOLD env var)
     const totalPixels = width * height;
     
     // Pre-calculate pixel indices for better performance
@@ -397,7 +397,7 @@ async function readFromCache(key) {
     }
 }
 
-async function writeToCache(key, data, headers, status, statusText) {
+async function writeToCache(key, data, headers, status, statusText, isTransparent = false) {
     try {
         await ensureCacheDir();
         const filePath = join(cacheDir, key);
@@ -410,7 +410,8 @@ async function writeToCache(key, data, headers, status, statusText) {
             writeFile(metaPath, JSON.stringify({
                 headers: serializedHeaders,
                 status,
-                statusText
+                statusText,
+                isTransparent // Track if image has transparent background
             }))
         ]);
     } catch (err) {
@@ -440,7 +441,15 @@ async function getCacheStats() {
             entries: 0,
             imageMB: 0,
             metadataMB: 0,
-            totalMB: 0
+            totalMB: 0,
+            normalImages: {
+                count: 0,
+                sizeMB: 0
+            },
+            transparentImages: {
+                count: 0,
+                sizeMB: 0
+            }
         };
     }
 
@@ -450,16 +459,56 @@ async function getCacheStats() {
     let itemCount = 0;
     let imageBytes = 0;
     let metadataBytes = 0;
+    let normalCount = 0;
+    let normalBytes = 0;
+    let transparentCount = 0;
+    let transparentBytes = 0;
+
+    // Track which files we've processed to avoid double counting
+    const processedFiles = new Set();
 
     for (const entry of entries) {
         if (!entry.isFile()) continue;
         const filePath = join(cacheDir, entry.name);
         const size = (await stat(filePath)).size;
+        
         if (entry.name.endsWith(".json")) {
             metadataBytes += size;
+            
+            // Read metadata to check if image is transparent
+            try {
+                const metaRaw = await readFile(filePath, "utf8");
+                const meta = JSON.parse(metaRaw);
+                const baseName = entry.name.replace(".json", "");
+                
+                // Check if corresponding image file exists and hasn't been processed
+                if (!processedFiles.has(baseName)) {
+                    const imageFilePath = join(cacheDir, baseName);
+                    try {
+                        await access(imageFilePath, fsConstants.F_OK);
+                        const imageSize = (await stat(imageFilePath)).size;
+                        
+                        if (meta.isTransparent === true) {
+                            transparentCount++;
+                            transparentBytes += imageSize;
+                        } else {
+                            normalCount++;
+                            normalBytes += imageSize;
+                        }
+                        processedFiles.add(baseName);
+                    } catch (e) {
+                        // Image file doesn't exist, skip
+                    }
+                }
+            } catch (e) {
+                // Failed to read metadata, skip
+            }
         } else {
-            itemCount += 1;
-            imageBytes += size;
+            // Only count if not already processed via metadata
+            if (!processedFiles.has(entry.name)) {
+                itemCount += 1;
+                imageBytes += size;
+            }
         }
     }
 
@@ -469,7 +518,15 @@ async function getCacheStats() {
         entries: itemCount,
         imageMB: toMB(imageBytes),
         metadataMB: toMB(metadataBytes),
-        totalMB: toMB(imageBytes + metadataBytes)
+        totalMB: toMB(imageBytes + metadataBytes),
+        normalImages: {
+            count: normalCount,
+            sizeMB: toMB(normalBytes)
+        },
+        transparentImages: {
+            count: transparentCount,
+            sizeMB: toMB(transparentBytes)
+        }
     };
 }
 
