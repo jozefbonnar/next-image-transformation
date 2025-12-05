@@ -213,31 +213,27 @@ async function writeToCache(key, data, headers, status, statusText, isTransparen
             ([name]) => name.toLowerCase() !== "x-cache"
         );
         
-        // Write both image and metadata - if either fails, we want to know about it
-        const [imageWrite, metaWrite] = await Promise.allSettled([
+        const metadata = {
+            headers: serializedHeaders,
+            status,
+            statusText,
+            isTransparent // Track if image has transparent background
+        };
+        
+        // Write both image and metadata - ensure both succeed
+        const metadataJson = JSON.stringify(metadata);
+        
+        const [imageResult, metaResult] = await Promise.allSettled([
             writeFile(filePath, new Uint8Array(data)),
-            writeFile(metaPath, JSON.stringify({
-                headers: serializedHeaders,
-                status,
-                statusText,
-                isTransparent // Track if image has transparent background
-            }))
+            writeFile(metaPath, metadataJson)
         ]);
         
-        // Log warnings if either write failed
-        if (imageWrite.status === 'rejected') {
-            console.error("Failed to write image cache file:", imageWrite.reason);
+        if (imageResult.status === 'rejected') {
+            console.error("Failed to write image cache file:", imageResult.reason);
         }
-        if (metaWrite.status === 'rejected') {
-            console.error("Failed to write image cache metadata:", metaWrite.reason);
-            // If metadata write failed but image write succeeded, try to clean up the image file
-            // to avoid uncategorized entries
-            try {
-                await access(filePath, fsConstants.F_OK);
-                await writeFile(filePath, Buffer.alloc(0)); // Clear the file
-            } catch (e) {
-                // Ignore cleanup errors
-            }
+        
+        if (metaResult.status === 'rejected') {
+            console.error("Failed to write image cache metadata:", metaResult.reason);
         }
     } catch (err) {
         console.error("Failed to write image cache", err);
@@ -293,51 +289,73 @@ async function getCacheStats() {
     // Track which files we've processed to avoid double counting
     const processedFiles = new Set();
 
+    // FIRST PASS: Process all JSON metadata files first
+    // This ensures we categorize images with metadata before marking others as uncategorized
     for (const entry of entries) {
         if (!entry.isFile()) continue;
+        if (!entry.name.endsWith(".json")) continue;
+        
+        const filePath = join(cacheDir, entry.name);
+        const size = (await stat(filePath)).size;
+        metadataBytes += size;
+        
+        // Skip empty metadata files (they might be cleanup artifacts)
+        if (size === 0) continue;
+        
+        // Read metadata to check if image is transparent
+        try {
+            const metaRaw = await readFile(filePath, "utf8");
+            if (!metaRaw || metaRaw.trim() === "") {
+                // Empty metadata file, skip
+                continue;
+            }
+            const meta = JSON.parse(metaRaw);
+            const baseName = entry.name.replace(".json", "");
+            
+            // Check if corresponding image file exists
+            const imageFilePath = join(cacheDir, baseName);
+            try {
+                await access(imageFilePath, fsConstants.F_OK);
+                const imageSize = (await stat(imageFilePath)).size;
+                
+                // Skip empty image files
+                if (imageSize === 0) {
+                    processedFiles.add(baseName);
+                    continue;
+                }
+                
+                if (meta.isTransparent === true) {
+                    transparentCount++;
+                    transparentBytes += imageSize;
+                } else {
+                    normalCount++;
+                    normalBytes += imageSize;
+                }
+                processedFiles.add(baseName);
+                imageBytes += imageSize;
+            } catch (e) {
+                // Image file doesn't exist, skip this metadata file
+            }
+        } catch (e) {
+            // Failed to read/parse metadata - skip
+        }
+    }
+
+    // SECOND PASS: Process remaining non-JSON files (uncategorized images without metadata)
+    for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (entry.name.endsWith(".json")) continue; // Skip JSON files (already processed)
+        
         const filePath = join(cacheDir, entry.name);
         const size = (await stat(filePath)).size;
         
-        if (entry.name.endsWith(".json")) {
-            metadataBytes += size;
-            
-            // Read metadata to check if image is transparent
-            try {
-                const metaRaw = await readFile(filePath, "utf8");
-                const meta = JSON.parse(metaRaw);
-                const baseName = entry.name.replace(".json", "");
-                
-                // Check if corresponding image file exists and hasn't been processed
-                if (!processedFiles.has(baseName)) {
-                    const imageFilePath = join(cacheDir, baseName);
-                    try {
-                        await access(imageFilePath, fsConstants.F_OK);
-                        const imageSize = (await stat(imageFilePath)).size;
-                        
-                        if (meta.isTransparent === true) {
-                            transparentCount++;
-                            transparentBytes += imageSize;
-                        } else {
-                            normalCount++;
-                            normalBytes += imageSize;
-                        }
-                        processedFiles.add(baseName);
-                        imageBytes += imageSize;
-                    } catch (e) {
-                        // Image file doesn't exist, skip
-                    }
-                }
-            } catch (e) {
-                // Failed to read metadata, skip
-            }
-        } else {
-            // Image file without metadata (uncategorized)
-            if (!processedFiles.has(entry.name)) {
-                uncategorizedCount++;
-                uncategorizedBytes += size;
-                imageBytes += size;
-                processedFiles.add(entry.name);
-            }
+        // Image file without metadata (uncategorized)
+        // Skip empty files (they might be cleanup artifacts or failed writes)
+        if (!processedFiles.has(entry.name) && size > 0) {
+            uncategorizedCount++;
+            uncategorizedBytes += size;
+            imageBytes += size;
+            processedFiles.add(entry.name);
         }
     }
 
