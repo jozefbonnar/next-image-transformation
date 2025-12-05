@@ -263,13 +263,14 @@ async function getCacheStats() {
     await ensureCacheDir();
     const entries = await readdir(cacheDir, { withFileTypes: true });
 
-    let itemCount = 0;
     let imageBytes = 0;
     let metadataBytes = 0;
     let normalCount = 0;
     let normalBytes = 0;
     let transparentCount = 0;
     let transparentBytes = 0;
+    let uncategorizedCount = 0;
+    let uncategorizedBytes = 0;
 
     // Track which files we've processed to avoid double counting
     const processedFiles = new Set();
@@ -303,6 +304,7 @@ async function getCacheStats() {
                             normalBytes += imageSize;
                         }
                         processedFiles.add(baseName);
+                        imageBytes += imageSize;
                     } catch (e) {
                         // Image file doesn't exist, skip
                     }
@@ -311,18 +313,22 @@ async function getCacheStats() {
                 // Failed to read metadata, skip
             }
         } else {
-            // Only count if not already processed via metadata
+            // Image file without metadata (uncategorized)
             if (!processedFiles.has(entry.name)) {
-                itemCount += 1;
+                uncategorizedCount++;
+                uncategorizedBytes += size;
                 imageBytes += size;
+                processedFiles.add(entry.name);
             }
         }
     }
 
+    const totalCount = normalCount + transparentCount + uncategorizedCount;
+
     return {
         cacheEnabled: true,
         cacheDir,
-        entries: itemCount,
+        entries: totalCount,
         imageMB: toMB(imageBytes),
         metadataMB: toMB(metadataBytes),
         totalMB: toMB(imageBytes + metadataBytes),
@@ -333,6 +339,10 @@ async function getCacheStats() {
         transparentImages: {
             count: transparentCount,
             sizeMB: toMB(transparentBytes)
+        },
+        uncategorizedImages: {
+            count: uncategorizedCount,
+            sizeMB: toMB(uncategorizedBytes)
         }
     };
 }
