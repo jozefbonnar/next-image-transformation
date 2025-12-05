@@ -212,7 +212,9 @@ async function writeToCache(key, data, headers, status, statusText, isTransparen
         const serializedHeaders = Array.from(headers.entries()).filter(
             ([name]) => name.toLowerCase() !== "x-cache"
         );
-        await Promise.all([
+        
+        // Write both image and metadata - if either fails, we want to know about it
+        const [imageWrite, metaWrite] = await Promise.allSettled([
             writeFile(filePath, new Uint8Array(data)),
             writeFile(metaPath, JSON.stringify({
                 headers: serializedHeaders,
@@ -221,8 +223,24 @@ async function writeToCache(key, data, headers, status, statusText, isTransparen
                 isTransparent // Track if image has transparent background
             }))
         ]);
+        
+        // Log warnings if either write failed
+        if (imageWrite.status === 'rejected') {
+            console.error("Failed to write image cache file:", imageWrite.reason);
+        }
+        if (metaWrite.status === 'rejected') {
+            console.error("Failed to write image cache metadata:", metaWrite.reason);
+            // If metadata write failed but image write succeeded, try to clean up the image file
+            // to avoid uncategorized entries
+            try {
+                await access(filePath, fsConstants.F_OK);
+                await writeFile(filePath, Buffer.alloc(0)); // Clear the file
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+        }
     } catch (err) {
-        console.warn("Failed to write image cache", err);
+        console.error("Failed to write image cache", err);
     }
 }
 
