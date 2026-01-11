@@ -271,9 +271,10 @@ async function stats() {
 }
 
 // Helper function to process files in a directory and accumulate stats
-async function processCacheDirectory(dirPath, stats) {
+async function processCacheDirectory(dirPath, stats, dirStats = null) {
     try {
         const entries = await readdir(dirPath, { withFileTypes: true });
+        const processedFiles = new Set();
 
         // FIRST PASS: Process all JSON metadata files first
         for (const entry of entries) {
@@ -283,6 +284,9 @@ async function processCacheDirectory(dirPath, stats) {
             const filePath = join(dirPath, entry.name);
             const size = (await stat(filePath)).size;
             stats.metadataBytes += size;
+            if (dirStats) {
+                dirStats.metadataBytes += size;
+            }
             
             // Skip empty metadata files
             if (size === 0) continue;
@@ -303,19 +307,31 @@ async function processCacheDirectory(dirPath, stats) {
                     
                     // Skip empty image files
                     if (imageSize === 0) {
-                        stats.processedFiles.add(join(dirPath, baseName));
+                        processedFiles.add(imageFilePath);
                         continue;
                     }
                     
                     if (meta.isTransparent === true) {
                         stats.transparentCount++;
                         stats.transparentBytes += imageSize;
+                        if (dirStats) {
+                            dirStats.transparentCount++;
+                            dirStats.transparentBytes += imageSize;
+                        }
                     } else {
                         stats.normalCount++;
                         stats.normalBytes += imageSize;
+                        if (dirStats) {
+                            dirStats.normalCount++;
+                            dirStats.normalBytes += imageSize;
+                        }
                     }
-                    stats.processedFiles.add(join(dirPath, baseName));
+                    processedFiles.add(imageFilePath);
                     stats.imageBytes += imageSize;
+                    if (dirStats) {
+                        dirStats.imageBytes += imageSize;
+                        dirStats.count++;
+                    }
                 } catch (e) {
                     // Image file doesn't exist, skip this metadata file
                 }
@@ -333,11 +349,16 @@ async function processCacheDirectory(dirPath, stats) {
             const size = (await stat(filePath)).size;
             
             // Image file without metadata (uncategorized)
-            if (!stats.processedFiles.has(filePath) && size > 0) {
+            if (!processedFiles.has(filePath) && size > 0) {
                 stats.uncategorizedCount++;
                 stats.uncategorizedBytes += size;
                 stats.imageBytes += size;
-                stats.processedFiles.add(filePath);
+                processedFiles.add(filePath);
+                if (dirStats) {
+                    dirStats.uncategorizedCount++;
+                    dirStats.uncategorizedBytes += size;
+                    dirStats.count++;
+                }
             }
         }
     } catch (e) {
@@ -375,24 +396,86 @@ async function getCacheStats() {
         transparentCount: 0,
         transparentBytes: 0,
         uncategorizedCount: 0,
-        uncategorizedBytes: 0,
-        processedFiles: new Set()
+        uncategorizedBytes: 0
     };
 
+    const directoryStats = new Map(); // Track stats per directory
+
     // Process root directory (for backwards compatibility with old cache files)
-    await processCacheDirectory(cacheDir, stats);
+    const rootDirStats = {
+        count: 0,
+        imageBytes: 0,
+        metadataBytes: 0,
+        normalCount: 0,
+        normalBytes: 0,
+        transparentCount: 0,
+        transparentBytes: 0,
+        uncategorizedCount: 0,
+        uncategorizedBytes: 0
+    };
+    await processCacheDirectory(cacheDir, stats, rootDirStats);
+    if (rootDirStats.count > 0) {
+        directoryStats.set("(root)", rootDirStats);
+    }
 
     // Process all sharded subdirectories (00-ff)
     // Generate all possible 2-character hex combinations
     for (let i = 0; i < 256; i++) {
         const subdir = i.toString(16).padStart(2, '0');
         const subdirPath = join(cacheDir, subdir);
-        await processCacheDirectory(subdirPath, stats);
+        const dirStats = {
+            count: 0,
+            imageBytes: 0,
+            metadataBytes: 0,
+            normalCount: 0,
+            normalBytes: 0,
+            transparentCount: 0,
+            transparentBytes: 0,
+            uncategorizedCount: 0,
+            uncategorizedBytes: 0
+        };
+        await processCacheDirectory(subdirPath, stats, dirStats);
+        if (dirStats.count > 0) {
+            directoryStats.set(subdir, dirStats);
+        }
     }
 
     const totalCount = stats.normalCount + stats.transparentCount + stats.uncategorizedCount;
 
-    return {
+    // Calculate distribution statistics
+    const shardedDirs = Array.from(directoryStats.entries()).filter(([name]) => name !== "(root)");
+    const dirCounts = shardedDirs.map(([, d]) => d.count).filter(c => c > 0);
+    const distribution = {
+        totalSubdirectories: shardedDirs.length,
+        emptySubdirectories: 256 - shardedDirs.length,
+        minFilesPerDir: dirCounts.length > 0 ? Math.min(...dirCounts) : 0,
+        maxFilesPerDir: dirCounts.length > 0 ? Math.max(...dirCounts) : 0,
+        avgFilesPerDir: dirCounts.length > 0 ? Number((dirCounts.reduce((a, b) => a + b, 0) / dirCounts.length).toFixed(2)) : 0,
+        medianFilesPerDir: dirCounts.length > 0 ? calculateMedian(dirCounts) : 0
+    };
+
+    // Get top and bottom directories by file count
+    const sortedDirs = Array.from(directoryStats.entries())
+        .filter(([name]) => name !== "(root)")
+        .sort((a, b) => b[1].count - a[1].count);
+    
+    const topDirectories = sortedDirs.slice(0, 10).map(([name, dirStats]) => ({
+        subdirectory: name,
+        count: dirStats.count,
+        sizeMB: toMB(dirStats.imageBytes + dirStats.metadataBytes),
+        normalCount: dirStats.normalCount,
+        transparentCount: dirStats.transparentCount
+    }));
+
+    const bottomDirectories = sortedDirs.slice(-10).reverse().map(([name, dirStats]) => ({
+        subdirectory: name,
+        count: dirStats.count,
+        sizeMB: toMB(dirStats.imageBytes + dirStats.metadataBytes),
+        normalCount: dirStats.normalCount,
+        transparentCount: dirStats.transparentCount
+    }));
+
+    const result = {
         cacheEnabled: true,
         cacheDir,
         entries: totalCount,
@@ -410,8 +493,32 @@ async function getCacheStats() {
         uncategorizedImages: {
             count: stats.uncategorizedCount,
             sizeMB: toMB(stats.uncategorizedBytes)
-        }
+        },
+        distribution,
+        topDirectories,
+        bottomDirectories
     };
+
+    // Add root directory stats if it has files
+    if (directoryStats.has("(root)")) {
+        const rootStats = directoryStats.get("(root)");
+        result.rootDirectory = {
+            count: rootStats.count,
+            sizeMB: toMB(rootStats.imageBytes + rootStats.metadataBytes),
+            normalCount: rootStats.normalCount,
+            transparentCount: rootStats.transparentCount
+        };
+    }
+
+    return result;
+}
+
+function calculateMedian(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 
+        ? Number(((sorted[mid - 1] + sorted[mid]) / 2).toFixed(2))
+        : sorted[mid];
 }
 
 function toMB(bytes) {
