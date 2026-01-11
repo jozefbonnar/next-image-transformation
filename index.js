@@ -178,9 +178,20 @@ async function ensureCacheDir() {
     cacheInitialized = true;
 }
 
+// Get sharded cache path: use first 2 chars of hash to create subdirectories
+// This prevents performance issues with thousands of files in a single directory
+function getShardedCachePath(key) {
+    if (key.length < 2) {
+        // Fallback for edge cases (shouldn't happen with SHA256)
+        return join(cacheDir, key);
+    }
+    const subdir = key.substring(0, 2);
+    return join(cacheDir, subdir, key);
+}
+
 async function readFromCache(key) {
     try {
-        const filePath = join(cacheDir, key);
+        const filePath = getShardedCachePath(key);
         const metaPath = `${filePath}.json`;
         await ensureCacheDir();
         await Promise.all([
@@ -207,8 +218,13 @@ async function readFromCache(key) {
 async function writeToCache(key, data, headers, status, statusText, isTransparent = false) {
     try {
         await ensureCacheDir();
-        const filePath = join(cacheDir, key);
+        const filePath = getShardedCachePath(key);
         const metaPath = `${filePath}.json`;
+        
+        // Ensure subdirectory exists for sharded path
+        const subdir = join(cacheDir, key.substring(0, 2));
+        await mkdir(subdir, { recursive: true });
+        
         const serializedHeaders = Array.from(headers.entries()).filter(
             ([name]) => name.toLowerCase() !== "x-cache"
         );
@@ -254,6 +270,81 @@ async function stats() {
     }
 }
 
+// Helper function to process files in a directory and accumulate stats
+async function processCacheDirectory(dirPath, stats) {
+    try {
+        const entries = await readdir(dirPath, { withFileTypes: true });
+
+        // FIRST PASS: Process all JSON metadata files first
+        for (const entry of entries) {
+            if (!entry.isFile()) continue;
+            if (!entry.name.endsWith(".json")) continue;
+            
+            const filePath = join(dirPath, entry.name);
+            const size = (await stat(filePath)).size;
+            stats.metadataBytes += size;
+            
+            // Skip empty metadata files
+            if (size === 0) continue;
+            
+            // Read metadata to check if image is transparent
+            try {
+                const metaRaw = await readFile(filePath, "utf8");
+                if (!metaRaw || metaRaw.trim() === "") continue;
+                
+                const meta = JSON.parse(metaRaw);
+                const baseName = entry.name.replace(".json", "");
+                
+                // Check if corresponding image file exists
+                const imageFilePath = join(dirPath, baseName);
+                try {
+                    await access(imageFilePath, fsConstants.F_OK);
+                    const imageSize = (await stat(imageFilePath)).size;
+                    
+                    // Skip empty image files
+                    if (imageSize === 0) {
+                        stats.processedFiles.add(join(dirPath, baseName));
+                        continue;
+                    }
+                    
+                    if (meta.isTransparent === true) {
+                        stats.transparentCount++;
+                        stats.transparentBytes += imageSize;
+                    } else {
+                        stats.normalCount++;
+                        stats.normalBytes += imageSize;
+                    }
+                    stats.processedFiles.add(join(dirPath, baseName));
+                    stats.imageBytes += imageSize;
+                } catch (e) {
+                    // Image file doesn't exist, skip this metadata file
+                }
+            } catch (e) {
+                // Failed to read/parse metadata - skip
+            }
+        }
+
+        // SECOND PASS: Process remaining non-JSON files (uncategorized images without metadata)
+        for (const entry of entries) {
+            if (!entry.isFile()) continue;
+            if (entry.name.endsWith(".json")) continue;
+            
+            const filePath = join(dirPath, entry.name);
+            const size = (await stat(filePath)).size;
+            
+            // Image file without metadata (uncategorized)
+            if (!stats.processedFiles.has(filePath) && size > 0) {
+                stats.uncategorizedCount++;
+                stats.uncategorizedBytes += size;
+                stats.imageBytes += size;
+                stats.processedFiles.add(filePath);
+            }
+        }
+    } catch (e) {
+        // Directory doesn't exist or can't be read - skip
+    }
+}
+
 async function getCacheStats() {
     if (!cacheEnabled) {
         return {
@@ -275,110 +366,50 @@ async function getCacheStats() {
     }
 
     await ensureCacheDir();
-    const entries = await readdir(cacheDir, { withFileTypes: true });
 
-    let imageBytes = 0;
-    let metadataBytes = 0;
-    let normalCount = 0;
-    let normalBytes = 0;
-    let transparentCount = 0;
-    let transparentBytes = 0;
-    let uncategorizedCount = 0;
-    let uncategorizedBytes = 0;
+    const stats = {
+        imageBytes: 0,
+        metadataBytes: 0,
+        normalCount: 0,
+        normalBytes: 0,
+        transparentCount: 0,
+        transparentBytes: 0,
+        uncategorizedCount: 0,
+        uncategorizedBytes: 0,
+        processedFiles: new Set()
+    };
 
-    // Track which files we've processed to avoid double counting
-    const processedFiles = new Set();
+    // Process root directory (for backwards compatibility with old cache files)
+    await processCacheDirectory(cacheDir, stats);
 
-    // FIRST PASS: Process all JSON metadata files first
-    // This ensures we categorize images with metadata before marking others as uncategorized
-    for (const entry of entries) {
-        if (!entry.isFile()) continue;
-        if (!entry.name.endsWith(".json")) continue;
-        
-        const filePath = join(cacheDir, entry.name);
-        const size = (await stat(filePath)).size;
-        metadataBytes += size;
-        
-        // Skip empty metadata files (they might be cleanup artifacts)
-        if (size === 0) continue;
-        
-        // Read metadata to check if image is transparent
-        try {
-            const metaRaw = await readFile(filePath, "utf8");
-            if (!metaRaw || metaRaw.trim() === "") {
-                // Empty metadata file, skip
-                continue;
-            }
-            const meta = JSON.parse(metaRaw);
-            const baseName = entry.name.replace(".json", "");
-            
-            // Check if corresponding image file exists
-            const imageFilePath = join(cacheDir, baseName);
-            try {
-                await access(imageFilePath, fsConstants.F_OK);
-                const imageSize = (await stat(imageFilePath)).size;
-                
-                // Skip empty image files
-                if (imageSize === 0) {
-                    processedFiles.add(baseName);
-                    continue;
-                }
-                
-                if (meta.isTransparent === true) {
-                    transparentCount++;
-                    transparentBytes += imageSize;
-                } else {
-                    normalCount++;
-                    normalBytes += imageSize;
-                }
-                processedFiles.add(baseName);
-                imageBytes += imageSize;
-            } catch (e) {
-                // Image file doesn't exist, skip this metadata file
-            }
-        } catch (e) {
-            // Failed to read/parse metadata - skip
-        }
+    // Process all sharded subdirectories (00-ff)
+    // Generate all possible 2-character hex combinations
+    for (let i = 0; i < 256; i++) {
+        const subdir = i.toString(16).padStart(2, '0');
+        const subdirPath = join(cacheDir, subdir);
+        await processCacheDirectory(subdirPath, stats);
     }
 
-    // SECOND PASS: Process remaining non-JSON files (uncategorized images without metadata)
-    for (const entry of entries) {
-        if (!entry.isFile()) continue;
-        if (entry.name.endsWith(".json")) continue; // Skip JSON files (already processed)
-        
-        const filePath = join(cacheDir, entry.name);
-        const size = (await stat(filePath)).size;
-        
-        // Image file without metadata (uncategorized)
-        // Skip empty files (they might be cleanup artifacts or failed writes)
-        if (!processedFiles.has(entry.name) && size > 0) {
-            uncategorizedCount++;
-            uncategorizedBytes += size;
-            imageBytes += size;
-            processedFiles.add(entry.name);
-        }
-    }
-
-    const totalCount = normalCount + transparentCount + uncategorizedCount;
+    const totalCount = stats.normalCount + stats.transparentCount + stats.uncategorizedCount;
 
     return {
         cacheEnabled: true,
         cacheDir,
         entries: totalCount,
-        imageMB: toMB(imageBytes),
-        metadataMB: toMB(metadataBytes),
-        totalMB: toMB(imageBytes + metadataBytes),
+        imageMB: toMB(stats.imageBytes),
+        metadataMB: toMB(stats.metadataBytes),
+        totalMB: toMB(stats.imageBytes + stats.metadataBytes),
         normalImages: {
-            count: normalCount,
-            sizeMB: toMB(normalBytes)
+            count: stats.normalCount,
+            sizeMB: toMB(stats.normalBytes)
         },
         transparentImages: {
-            count: transparentCount,
-            sizeMB: toMB(transparentBytes)
+            count: stats.transparentCount,
+            sizeMB: toMB(stats.transparentBytes)
         },
         uncategorizedImages: {
-            count: uncategorizedCount,
-            sizeMB: toMB(uncategorizedBytes)
+            count: stats.uncategorizedCount,
+            sizeMB: toMB(stats.uncategorizedBytes)
         }
     };
 }
