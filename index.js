@@ -2,6 +2,7 @@ const { mkdir, readFile, writeFile, access, readdir, stat } = require("node:fs/p
 const { constants: fsConstants } = require("node:fs");
 const { createHash } = require("node:crypto");
 const { join } = require("node:path");
+const sharp = require("sharp");
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
 let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
@@ -9,6 +10,9 @@ const healthcheckImageUrl = process?.env?.HEALTHCHECK_IMAGE_URL || "https://samp
 const cacheDir = process?.env?.CACHE_DIR || "./cache";
 const cacheEnabled = process?.env?.CACHE_ENABLED !== "false";
 const whiteBackgroundThreshold = parseInt(process?.env?.WHITE_BACKGROUND_THRESHOLD || "253");
+// Server tint for load-balancing visibility (e.g. SERVER_TINT_COLOR=FF0000 for red, 00FF00 for green)
+const _tint = process?.env?.SERVER_TINT_COLOR?.trim();
+const serverTintColor = _tint ? (_tint.startsWith("#") ? _tint : `#${_tint}`) : null;
 let cacheInitialized = false;
 
 if (process.env.NODE_ENV === "development") {
@@ -68,7 +72,7 @@ async function resize(url) {
     const height = url.searchParams.get("height") || 0;
     const quality = url.searchParams.get("quality") || 75;
     const removeBg = url.searchParams.get("removeBg") === "true" || url.searchParams.get("transparent") === "true";
-    const cacheKey = getCacheKey(src, width, height, quality, removeBg);
+    const cacheKey = getCacheKey(src, width, height, quality, removeBg, serverTintColor);
     if (cacheEnabled) {
         const cached = await readFromCache(cacheKey);
         if (cached) {
@@ -148,7 +152,18 @@ async function resize(url) {
                 "Accept": "image/avif,image/webp,image/apng,*/*",
             }
         })
-        const arrayBuffer = await image.arrayBuffer();
+        let arrayBuffer = await image.arrayBuffer();
+        // Apply server tint for load-balancing visibility (each server gets a different colour)
+        if (image.ok && serverTintColor) {
+            try {
+                const tinted = await sharp(Buffer.from(arrayBuffer))
+                    .tint(serverTintColor)
+                    .toBuffer();
+                arrayBuffer = tinted.buffer.slice(tinted.byteOffset, tinted.byteOffset + tinted.byteLength);
+            } catch (tintErr) {
+                console.warn("Failed to apply server tint:", tintErr.message);
+            }
+        }
         const headers = new Headers(image.headers);
         headers.set("Server", "NextImageTransformation");
         if (image.ok && cacheEnabled) {
@@ -166,9 +181,9 @@ async function resize(url) {
     }
 }
 
-function getCacheKey(src, width, height, quality, removeBg = false) {
+function getCacheKey(src, width, height, quality, removeBg = false, tintColor = null) {
     const hash = createHash("sha256");
-    hash.update(`${src}|${width}|${height}|${quality}|${removeBg}`);
+    hash.update(`${src}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
     return hash.digest("hex");
 }
 
