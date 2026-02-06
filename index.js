@@ -285,100 +285,97 @@ async function stats() {
     }
 }
 
-// Helper function to process files in a directory and accumulate stats
-async function processCacheDirectory(dirPath, stats, dirStats = null) {
+// Helper: process a single JSON metadata file; only mutates dirStats (per-directory stats)
+async function processOneMetadataFile(dirPath, entry, dirStats) {
+    const filePath = join(dirPath, entry.name);
+    let size;
+    try {
+        size = (await stat(filePath)).size;
+    } catch {
+        return { processedFiles: [] };
+    }
+    dirStats.metadataBytes += size;
+    if (size === 0) return { processedFiles: [] };
+
+    try {
+        const metaRaw = await readFile(filePath, "utf8");
+        if (!metaRaw || metaRaw.trim() === "") return { processedFiles: [] };
+        const meta = JSON.parse(metaRaw);
+        const baseName = entry.name.replace(".json", "");
+        const imageFilePath = join(dirPath, baseName);
+        try {
+            await access(imageFilePath, fsConstants.F_OK);
+            const imageSize = (await stat(imageFilePath)).size;
+            if (imageSize === 0) return { processedFiles: [imageFilePath] };
+
+            if (meta.isTransparent === true) {
+                dirStats.transparentCount++;
+                dirStats.transparentBytes += imageSize;
+            } else {
+                dirStats.normalCount++;
+                dirStats.normalBytes += imageSize;
+            }
+            dirStats.imageBytes += imageSize;
+            dirStats.count++;
+            return { processedFiles: [imageFilePath] };
+        } catch {
+            return { processedFiles: [] };
+        }
+    } catch {
+        return { processedFiles: [] };
+    }
+}
+
+const STATS_BATCH_SIZE = 64; // parallel file ops per directory
+
+// Helper: process one directory and accumulate into dirStats only (no shared state)
+async function processCacheDirectory(dirPath, dirStats) {
     try {
         const entries = await readdir(dirPath, { withFileTypes: true });
         const processedFiles = new Set();
 
-        // FIRST PASS: Process all JSON metadata files first
-        for (const entry of entries) {
-            if (!entry.isFile()) continue;
-            if (!entry.name.endsWith(".json")) continue;
-            
-            const filePath = join(dirPath, entry.name);
-            const size = (await stat(filePath)).size;
-            stats.metadataBytes += size;
-            if (dirStats) {
-                dirStats.metadataBytes += size;
-            }
-            
-            // Skip empty metadata files
-            if (size === 0) continue;
-            
-            // Read metadata to check if image is transparent
-            try {
-                const metaRaw = await readFile(filePath, "utf8");
-                if (!metaRaw || metaRaw.trim() === "") continue;
-                
-                const meta = JSON.parse(metaRaw);
-                const baseName = entry.name.replace(".json", "");
-                
-                // Check if corresponding image file exists
-                const imageFilePath = join(dirPath, baseName);
-                try {
-                    await access(imageFilePath, fsConstants.F_OK);
-                    const imageSize = (await stat(imageFilePath)).size;
-                    
-                    // Skip empty image files
-                    if (imageSize === 0) {
-                        processedFiles.add(imageFilePath);
-                        continue;
-                    }
-                    
-                    if (meta.isTransparent === true) {
-                        stats.transparentCount++;
-                        stats.transparentBytes += imageSize;
-                        if (dirStats) {
-                            dirStats.transparentCount++;
-                            dirStats.transparentBytes += imageSize;
-                        }
-                    } else {
-                        stats.normalCount++;
-                        stats.normalBytes += imageSize;
-                        if (dirStats) {
-                            dirStats.normalCount++;
-                            dirStats.normalBytes += imageSize;
-                        }
-                    }
-                    processedFiles.add(imageFilePath);
-                    stats.imageBytes += imageSize;
-                    if (dirStats) {
-                        dirStats.imageBytes += imageSize;
-                        dirStats.count++;
-                    }
-                } catch (e) {
-                    // Image file doesn't exist, skip this metadata file
-                }
-            } catch (e) {
-                // Failed to read/parse metadata - skip
+        const jsonEntries = entries.filter(e => e.isFile() && e.name.endsWith(".json"));
+        for (let i = 0; i < jsonEntries.length; i += STATS_BATCH_SIZE) {
+            const batch = jsonEntries.slice(i, i + STATS_BATCH_SIZE);
+            const results = await Promise.all(
+                batch.map((entry) => processOneMetadataFile(dirPath, entry, dirStats))
+            );
+            for (const r of results) {
+                for (const p of r.processedFiles) processedFiles.add(p);
             }
         }
 
-        // SECOND PASS: Process remaining non-JSON files (uncategorized images without metadata)
-        for (const entry of entries) {
-            if (!entry.isFile()) continue;
-            if (entry.name.endsWith(".json")) continue;
-            
+        const nonJsonFiles = entries.filter(e => e.isFile() && !e.name.endsWith(".json"));
+        for (const entry of nonJsonFiles) {
             const filePath = join(dirPath, entry.name);
-            const size = (await stat(filePath)).size;
-            
-            // Image file without metadata (uncategorized)
-            if (!processedFiles.has(filePath) && size > 0) {
-                stats.uncategorizedCount++;
-                stats.uncategorizedBytes += size;
-                stats.imageBytes += size;
-                processedFiles.add(filePath);
-                if (dirStats) {
+            if (processedFiles.has(filePath)) continue;
+            try {
+                const size = (await stat(filePath)).size;
+                if (size > 0) {
                     dirStats.uncategorizedCount++;
                     dirStats.uncategorizedBytes += size;
+                    dirStats.imageBytes += size;
                     dirStats.count++;
+                    processedFiles.add(filePath);
                 }
+            } catch {
+                // ignore
             }
         }
     } catch (e) {
         // Directory doesn't exist or can't be read - skip
     }
+}
+
+function mergeDirStatsIntoStats(dirStats, stats) {
+    stats.imageBytes += dirStats.imageBytes;
+    stats.metadataBytes += dirStats.metadataBytes;
+    stats.normalCount += dirStats.normalCount;
+    stats.normalBytes += dirStats.normalBytes;
+    stats.transparentCount += dirStats.transparentCount;
+    stats.transparentBytes += dirStats.transparentBytes;
+    stats.uncategorizedCount += dirStats.uncategorizedCount;
+    stats.uncategorizedBytes += dirStats.uncategorizedBytes;
 }
 
 async function getCacheStats() {
@@ -428,31 +425,41 @@ async function getCacheStats() {
         uncategorizedCount: 0,
         uncategorizedBytes: 0
     };
-    await processCacheDirectory(cacheDir, stats, rootDirStats);
+    await processCacheDirectory(cacheDir, rootDirStats);
+    mergeDirStatsIntoStats(rootDirStats, stats);
     if (rootDirStats.count > 0) {
         directoryStats.set("(root)", rootDirStats);
     }
 
-    // Process all sharded subdirectories (00-ff)
-    // Generate all possible 2-character hex combinations
-    for (let i = 0; i < 256; i++) {
-        const subdir = i.toString(16).padStart(2, '0');
-        const subdirPath = join(cacheDir, subdir);
-        const dirStats = {
-            count: 0,
-            imageBytes: 0,
-            metadataBytes: 0,
-            normalCount: 0,
-            normalBytes: 0,
-            transparentCount: 0,
-            transparentBytes: 0,
-            uncategorizedCount: 0,
-            uncategorizedBytes: 0
-        };
-        await processCacheDirectory(subdirPath, stats, dirStats);
-        if (dirStats.count > 0) {
-            directoryStats.set(subdir, dirStats);
-        }
+    // Process only existing sharded subdirectories, in parallel
+    let subdirs = [];
+    try {
+        const topEntries = await readdir(cacheDir, { withFileTypes: true });
+        subdirs = topEntries.filter((e) => e.isDirectory() && /^[0-9a-f]{2}$/i.test(e.name)).map((e) => e.name);
+    } catch (e) {
+        // ignore
+    }
+
+    const subdirResults = await Promise.all(
+        subdirs.map(async (subdir) => {
+            const dirStats = {
+                count: 0,
+                imageBytes: 0,
+                metadataBytes: 0,
+                normalCount: 0,
+                normalBytes: 0,
+                transparentCount: 0,
+                transparentBytes: 0,
+                uncategorizedCount: 0,
+                uncategorizedBytes: 0
+            };
+            await processCacheDirectory(join(cacheDir, subdir), dirStats);
+            return [subdir, dirStats];
+        })
+    );
+    for (const [name, dirStats] of subdirResults) {
+        mergeDirStatsIntoStats(dirStats, stats);
+        if (dirStats.count > 0) directoryStats.set(name, dirStats);
     }
 
     const totalCount = stats.normalCount + stats.transparentCount + stats.uncategorizedCount;
