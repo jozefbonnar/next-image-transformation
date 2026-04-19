@@ -5,8 +5,8 @@ import { join } from "node:path";
 import sharp from "sharp";
 import {
     parseImageSourceFromRequest,
-    cacheKeySourceString,
     encodeImgproxyPlainSource,
+    isAwsPresignedSourceUrl,
 } from "./source-url.js";
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
@@ -67,15 +67,9 @@ async function resize(url) {
     const height = url.searchParams.get("height") || 0;
     const quality = url.searchParams.get("quality") || 75;
     const removeBg = url.searchParams.get("removeBg") === "true" || url.searchParams.get("transparent") === "true";
-    const cacheKey = getCacheKey(
-        cacheKeySourceString(src),
-        width,
-        height,
-        quality,
-        removeBg,
-        serverTintColor
-    );
-    if (cacheEnabled) {
+    const useCache = cacheEnabled && !isAwsPresignedSourceUrl(src);
+    const cacheKey = getCacheKey(src, width, height, quality, removeBg, serverTintColor);
+    if (useCache) {
         const cached = await readFromCache(cacheKey);
         if (cached) {
             cached.headers.set("Server", "NextImageTransformation");
@@ -168,10 +162,10 @@ async function resize(url) {
         }
         const headers = new Headers(image.headers);
         headers.set("Server", "NextImageTransformation");
-        if (image.ok && cacheEnabled) {
+        if (image.ok && useCache) {
             await writeToCache(cacheKey, arrayBuffer, headers, image.status, image.statusText, removeBg); // Track if transparent
         }
-        headers.set("X-Cache", image.ok ? (cacheEnabled ? "MISS" : "BYPASS") : "SKIP");
+        headers.set("X-Cache", image.ok ? (useCache ? "MISS" : "BYPASS") : "SKIP");
         return new Response(arrayBuffer, {
             headers,
             status: image.status,
@@ -183,9 +177,9 @@ async function resize(url) {
     }
 }
 
-function getCacheKey(cacheSource, width, height, quality, removeBg = false, tintColor = null) {
+function getCacheKey(src, width, height, quality, removeBg = false, tintColor = null) {
     const hash = createHash("sha256");
-    hash.update(`${cacheSource}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
+    hash.update(`${src}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
     return hash.digest("hex");
 }
 

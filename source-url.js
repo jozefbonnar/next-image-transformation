@@ -64,19 +64,21 @@ export function parseImageSourceFromRequest(requestUrl) {
 }
 
 /**
- * Stable cache identity for http(s) URLs: origin + pathname (drops query and hash).
- * Presigned URLs that only differ by signature params share one cache entry.
+ * True if the remote URL uses AWS SigV4-style presigning (R2, S3, etc.).
+ * Those URLs should not be read from or written to the derivative cache.
  */
-export function cacheKeySourceString(src) {
+export function isAwsPresignedSourceUrl(src) {
     try {
         const u = new URL(src);
-        if (u.protocol === "http:" || u.protocol === "https:") {
-            return `${u.origin}${u.pathname}`;
+        for (const key of u.searchParams.keys()) {
+            if (key.toLowerCase().startsWith("x-amz-")) {
+                return true;
+            }
         }
+        return false;
     } catch {
-        // fall through
+        return false;
     }
-    return src;
 }
 
 /**
