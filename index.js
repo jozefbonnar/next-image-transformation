@@ -181,9 +181,20 @@ async function resize(url) {
     }
 }
 
+function normalizeUrlForCache(src) {
+    try {
+        const u = new URL(src);
+        u.search = "";
+        return u.toString();
+    } catch {
+        return src;
+    }
+}
+
 function getCacheKey(src, width, height, quality, removeBg = false, tintColor = null) {
+    const normalizedSrc = normalizeUrlForCache(src);
     const hash = createHash("sha256");
-    hash.update(`${src}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
+    hash.update(`${normalizedSrc}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
     return hash.digest("hex");
 }
 
