@@ -1,8 +1,13 @@
-const { mkdir, readFile, writeFile, access, readdir, stat } = require("node:fs/promises");
-const { constants: fsConstants } = require("node:fs");
-const { createHash } = require("node:crypto");
-const { join } = require("node:path");
-const sharp = require("sharp");
+import { mkdir, readFile, writeFile, access, readdir, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import sharp from "sharp";
+import {
+    parseImageSourceFromRequest,
+    cacheKeySourceString,
+    encodeImgproxyPlainSource,
+} from "./source-url.js";
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
 let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
@@ -41,18 +46,8 @@ Bun.serve({
 async function resize(url) {
     
     const preset = "pr:sharp"
-    // Extract source URL from pathname, handling URL encoding
-    let src = url.pathname.split("/").slice(2).join("/");
-    // Decode URL-encoded characters
-    src = decodeURIComponent(src);
-    // Fix common issues: if src starts with "https:/" (missing slash), fix it
-    if (src.startsWith("https:/") && !src.startsWith("https://")) {
-        src = src.replace("https:/", "https://");
-    }
-    if (src.startsWith("http:/") && !src.startsWith("http://")) {
-        src = src.replace("http:/", "http://");
-    }
-    
+    const src = parseImageSourceFromRequest(url);
+
     let origin;
     try {
         origin = new URL(src).hostname;
@@ -72,7 +67,14 @@ async function resize(url) {
     const height = url.searchParams.get("height") || 0;
     const quality = url.searchParams.get("quality") || 75;
     const removeBg = url.searchParams.get("removeBg") === "true" || url.searchParams.get("transparent") === "true";
-    const cacheKey = getCacheKey(src, width, height, quality, removeBg, serverTintColor);
+    const cacheKey = getCacheKey(
+        cacheKeySourceString(src),
+        width,
+        height,
+        quality,
+        removeBg,
+        serverTintColor
+    );
     if (cacheEnabled) {
         const cached = await readFromCache(cacheKey);
         if (cached) {
@@ -145,7 +147,7 @@ async function resize(url) {
             imgproxyPath += `/resize:fill:${width}:${height}`;
         }
         
-        imgproxyPath += `/q:${quality}/plain/${src}`;
+        imgproxyPath += `/q:${quality}/plain/${encodeImgproxyPlainSource(src)}`;
         const imgproxyRequestUrl = `${imgproxyUrl}/${imgproxyPath}`;
         const image = await fetch(imgproxyRequestUrl, {
             headers: {
@@ -181,9 +183,9 @@ async function resize(url) {
     }
 }
 
-function getCacheKey(src, width, height, quality, removeBg = false, tintColor = null) {
+function getCacheKey(cacheSource, width, height, quality, removeBg = false, tintColor = null) {
     const hash = createHash("sha256");
-    hash.update(`${src}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
+    hash.update(`${cacheSource}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
     return hash.digest("hex");
 }
 
@@ -549,7 +551,7 @@ function toMB(bytes) {
 
 async function healthCheck() {
     const preset = "pr:sharp";
-    const healthUrl = `${imgproxyUrl}/${preset}/resize:fit:1:1/plain/${healthcheckImageUrl}`;
+    const healthUrl = `${imgproxyUrl}/${preset}/resize:fit:1:1/plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`;
 
     try {
         const response = await fetch(healthUrl, {

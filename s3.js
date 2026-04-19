@@ -6,6 +6,11 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 import {
+    parseImageSourceFromRequest,
+    cacheKeySourceString,
+    encodeImgproxyPlainSource,
+} from "./source-url.js";
+import {
     S3Client,
     GetObjectCommand,
     PutObjectCommand,
@@ -38,9 +43,9 @@ if (s3Endpoint) {
 }
 const s3 = new S3Client(s3ClientConfig);
 
-function getCacheKey(src, width, height, quality, removeBg = false, tintColor = null) {
+function getCacheKey(cacheSource, width, height, quality, removeBg = false, tintColor = null) {
     const hash = createHash("sha256");
-    hash.update(`${src}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
+    hash.update(`${cacheSource}|${width}|${height}|${quality}|${removeBg}|${tintColor || ""}`);
     return hash.digest("hex");
 }
 
@@ -264,14 +269,7 @@ async function getCacheStats() {
 
 async function resize(url) {
     const preset = "pr:sharp";
-    let src = url.pathname.split("/").slice(2).join("/");
-    src = decodeURIComponent(src);
-    if (src.startsWith("https:/") && !src.startsWith("https://")) {
-        src = src.replace("https:/", "https://");
-    }
-    if (src.startsWith("http:/") && !src.startsWith("http://")) {
-        src = src.replace("http:/", "http://");
-    }
+    const src = parseImageSourceFromRequest(url);
 
     let origin;
     try {
@@ -293,7 +291,14 @@ async function resize(url) {
     const height = url.searchParams.get("height") || 0;
     const quality = url.searchParams.get("quality") || 75;
     const removeBg = url.searchParams.get("removeBg") === "true" || url.searchParams.get("transparent") === "true";
-    const cacheKey = getCacheKey(src, width, height, quality, removeBg, serverTintColor);
+    const cacheKey = getCacheKey(
+        cacheKeySourceString(src),
+        width,
+        height,
+        quality,
+        removeBg,
+        serverTintColor
+    );
 
     if (cacheEnabled) {
         const cached = await readFromCache(cacheKey);
@@ -332,7 +337,7 @@ async function resize(url) {
         } else {
             imgproxyPath += `/resize:fill:${width}:${height}`;
         }
-        imgproxyPath += `/q:${quality}/plain/${src}`;
+        imgproxyPath += `/q:${quality}/plain/${encodeImgproxyPlainSource(src)}`;
         const imgproxyRequestUrl = `${imgproxyUrl}/${imgproxyPath}`;
         const image = await fetch(imgproxyRequestUrl, {
             headers: { Accept: "image/avif,image/webp,image/apng,*/*" },
@@ -382,7 +387,7 @@ async function stats() {
 
 async function healthCheck() {
     const preset = "pr:sharp";
-    const healthUrl = `${imgproxyUrl}/${preset}/resize:fit:1:1/plain/${healthcheckImageUrl}`;
+    const healthUrl = `${imgproxyUrl}/${preset}/resize:fit:1:1/plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`;
     try {
         const response = await fetch(healthUrl, {
             headers: { Accept: "image/avif,image/webp,image/apng,*/*" },
