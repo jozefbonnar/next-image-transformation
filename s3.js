@@ -10,6 +10,7 @@ import {
     encodeImgproxyPlainSource,
     isAwsPresignedSourceUrl,
 } from "./source-url.js";
+import { buildImgproxyRequestUrl } from "./imgproxy-sign.js";
 import {
     S3Client,
     GetObjectCommand,
@@ -20,6 +21,8 @@ import {
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
 let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
+const imgproxyKey = process?.env?.IMGPROXY_KEY?.trim() || "";
+const imgproxySalt = process?.env?.IMGPROXY_SALT?.trim() || "";
 const healthcheckImageUrl = process?.env?.HEALTHCHECK_IMAGE_URL || "https://sampletestfile.com/wp-content/uploads/2023/05/585-KB.png";
 const cacheEnabled = process?.env?.CACHE_ENABLED !== "false";
 const whiteBackgroundThreshold = parseInt(process?.env?.WHITE_BACKGROUND_THRESHOLD || "253");
@@ -332,7 +335,12 @@ async function resize(url) {
             imgproxyPath += `/resize:fill:${width}:${height}`;
         }
         imgproxyPath += `/q:${quality}/plain/${encodeImgproxyPlainSource(src)}`;
-        const imgproxyRequestUrl = `${imgproxyUrl}/${imgproxyPath}`;
+        const imgproxyRequestUrl = buildImgproxyRequestUrl(
+            imgproxyUrl,
+            imgproxyPath,
+            imgproxyKey,
+            imgproxySalt
+        );
         const image = await fetch(imgproxyRequestUrl, {
             headers: { Accept: "image/avif,image/webp,image/apng,*/*" },
         });
@@ -381,7 +389,12 @@ async function stats() {
 
 async function healthCheck() {
     const preset = "pr:sharp";
-    const healthUrl = `${imgproxyUrl}/${preset}/resize:fit:1:1/plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`;
+    const healthUrl = buildImgproxyRequestUrl(
+        imgproxyUrl,
+        `${preset}/resize:fit:1:1/plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`,
+        imgproxyKey,
+        imgproxySalt
+    );
     try {
         const response = await fetch(healthUrl, {
             headers: { Accept: "image/avif,image/webp,image/apng,*/*" },
