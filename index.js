@@ -9,6 +9,7 @@ import {
     isAwsPresignedSourceUrl,
 } from "./source-url.js";
 import { buildImgproxyRequestUrl } from "./imgproxy-sign.js";
+import { imgproxyLeadingOptions, joinImgproxyPath } from "./imgproxy-path.js";
 
 let allowedDomains = process?.env?.ALLOWED_REMOTE_DOMAINS?.split(",") || ["*"];
 let imgproxyUrl = process?.env?.IMGPROXY_URL || "http://localhost:8888";
@@ -48,7 +49,6 @@ Bun.serve({
 
 async function resize(url) {
     
-    const preset = "pr:sharp"
     const src = parseImageSourceFromRequest(url);
 
     let origin;
@@ -86,8 +86,8 @@ async function resize(url) {
     }
 
     try {
-        // Build imgproxy path with optional trim for background removal
-        let imgproxyPath = `${preset}`;
+        const lead = imgproxyLeadingOptions();
+        let imgproxyPath = lead;
         
         // Add trim option if background removal is requested
         // trim:threshold:color - explicitly specify white (FFFFFF) for better performance
@@ -96,7 +96,7 @@ async function resize(url) {
             // Higher threshold = more sensitive (only very white), so we invert: 255 -> 0, 247 -> ~3, 240 -> ~6
             const trimThreshold = Math.max(0, Math.min(100, Math.round((255 - whiteBackgroundThreshold) / 2.55)));
             // Explicitly specify white color (FFFFFF) for trim - this is more efficient
-            imgproxyPath += `/trim:${trimThreshold}:FFFFFF`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, `trim:${trimThreshold}:FFFFFF`);
             
             // After trim, resize to fit within requested dimensions, then extend to fill exactly
             const targetWidth = parseInt(width) || 0;
@@ -131,20 +131,24 @@ async function resize(url) {
             
             // Resize to fit within the target dimensions (preserves aspect ratio, fits within bounds)
             // This should ensure both dimensions are <= target
-            imgproxyPath += `/resize:fit:${finalWidth}:${finalHeight}`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, `resize:fit:${finalWidth}:${finalHeight}`);
             
             // Extend to fill exact dimensions with transparent background (centered)
             // This adds transparent padding if the image is smaller than requested
-            imgproxyPath += `/extend:1:ce`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, "extend:1:ce");
             
             // Ensure WebP format for transparency support  
-            imgproxyPath += `/format:webp`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, "format:webp");
         } else {
             // Normal images: use fill to crop to exact dimensions
-            imgproxyPath += `/resize:fill:${width}:${height}`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, `resize:fill:${width}:${height}`);
         }
         
-        imgproxyPath += `/q:${quality}/plain/${encodeImgproxyPlainSource(src)}`;
+        imgproxyPath = joinImgproxyPath(
+            imgproxyPath,
+            `q:${quality}`,
+            `plain/${encodeImgproxyPlainSource(src)}`
+        );
         const imgproxyRequestUrl = buildImgproxyRequestUrl(
             imgproxyUrl,
             imgproxyPath,
@@ -552,10 +556,13 @@ function toMB(bytes) {
 }
 
 async function healthCheck() {
-    const preset = "pr:sharp";
     const healthUrl = buildImgproxyRequestUrl(
         imgproxyUrl,
-        `${preset}/resize:fit:1:1/plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`,
+        joinImgproxyPath(
+            imgproxyLeadingOptions(),
+            "resize:fit:1:1",
+            `plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`
+        ),
         imgproxyKey,
         imgproxySalt
     );

@@ -11,6 +11,7 @@ import {
     isAwsPresignedSourceUrl,
 } from "./source-url.js";
 import { buildImgproxyRequestUrl } from "./imgproxy-sign.js";
+import { imgproxyLeadingOptions, joinImgproxyPath } from "./imgproxy-path.js";
 import {
     S3Client,
     GetObjectCommand,
@@ -271,7 +272,6 @@ async function getCacheStats() {
 }
 
 async function resize(url) {
-    const preset = "pr:sharp";
     const src = parseImageSourceFromRequest(url);
 
     let origin;
@@ -311,10 +311,10 @@ async function resize(url) {
     }
 
     try {
-        let imgproxyPath = `${preset}`;
+        let imgproxyPath = imgproxyLeadingOptions();
         if (removeBg) {
             const trimThreshold = Math.max(0, Math.min(100, Math.round((255 - whiteBackgroundThreshold) / 2.55)));
-            imgproxyPath += `/trim:${trimThreshold}:FFFFFF`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, `trim:${trimThreshold}:FFFFFF`);
             const targetWidth = parseInt(width) || 0;
             const targetHeight = parseInt(height) || 0;
             let finalWidth, finalHeight;
@@ -328,13 +328,17 @@ async function resize(url) {
             } else {
                 finalWidth = finalHeight = 256;
             }
-            imgproxyPath += `/resize:fit:${finalWidth}:${finalHeight}`;
-            imgproxyPath += `/extend:1:ce`;
-            imgproxyPath += `/format:webp`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, `resize:fit:${finalWidth}:${finalHeight}`);
+            imgproxyPath = joinImgproxyPath(imgproxyPath, "extend:1:ce");
+            imgproxyPath = joinImgproxyPath(imgproxyPath, "format:webp");
         } else {
-            imgproxyPath += `/resize:fill:${width}:${height}`;
+            imgproxyPath = joinImgproxyPath(imgproxyPath, `resize:fill:${width}:${height}`);
         }
-        imgproxyPath += `/q:${quality}/plain/${encodeImgproxyPlainSource(src)}`;
+        imgproxyPath = joinImgproxyPath(
+            imgproxyPath,
+            `q:${quality}`,
+            `plain/${encodeImgproxyPlainSource(src)}`
+        );
         const imgproxyRequestUrl = buildImgproxyRequestUrl(
             imgproxyUrl,
             imgproxyPath,
@@ -388,10 +392,13 @@ async function stats() {
 }
 
 async function healthCheck() {
-    const preset = "pr:sharp";
     const healthUrl = buildImgproxyRequestUrl(
         imgproxyUrl,
-        `${preset}/resize:fit:1:1/plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`,
+        joinImgproxyPath(
+            imgproxyLeadingOptions(),
+            "resize:fit:1:1",
+            `plain/${encodeImgproxyPlainSource(healthcheckImageUrl)}`
+        ),
         imgproxyKey,
         imgproxySalt
     );
