@@ -1,15 +1,26 @@
 services:
   api:
-    image: ghcr.io/coollabsio/next-image-transformation
+    build: .
     environment:
       - NODE_ENV=production
       - ALLOWED_REMOTE_DOMAINS=*
       - IMGPROXY_URL=http://imgproxy:8080
+    ports:
+      - "3000:3000"
+    volumes:
+      - image-cache:/app/cache
     healthcheck:
-      test: "wget -qO- http://localhost:3000/health || exit 1"
-      interval: 2s
-      timeout: 10s
-      retries: 5
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "const r = await fetch('http://127.0.0.1:3000/health'); if (!r.ok) process.exit(1)",
+        ]
+      interval: 10s
+      timeout: 15s
+      retries: 12
+      start_period: 15s
     depends_on:
       imgproxy:
         condition: service_healthy
@@ -22,6 +33,9 @@ services:
       - IMGPROXY_USE_ETAG=true
     healthcheck:
       test: [ "CMD", "imgproxy", "health" ]
-      interval: 2s
-      timeout: 10s
-      retries: 5
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  image-cache:
