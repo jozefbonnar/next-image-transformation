@@ -5,6 +5,8 @@ services:
       - NODE_ENV=production
       - ALLOWED_REMOTE_DOMAINS=*
       - IMGPROXY_URL=http://imgproxy:8080
+    ports:
+      - "3000:3000"
     volumes:
       - image-cache:/app/cache
     healthcheck:
